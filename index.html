@@ -1,24 +1,280 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PS5 Fuzzer Test Hub</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>PS5 MP4 Fuzzer – Safe Triage Hub</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:20px;line-height:1.35}
+    header{margin-bottom:12px}
+    .row{display:flex;gap:16px;flex-wrap:wrap}
+    .card{border:1px solid #ddd;border-radius:10px;padding:12px;flex:1;min-width:280px;max-width:700px}
+    .controls button{padding:8px 12px;border:1px solid #999;border-radius:8px;background:#f7f7f7;cursor:pointer}
+    .controls button:active{transform:scale(0.98)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin-top:8px}
+    .link{display:block;padding:8px;border:1px solid #eee;border-radius:8px;text-decoration:none;color:#0366d6}
+    pre{white-space:pre-wrap;word-break:break-word;background:#fafafa;border:1px solid #eee;border-radius:8px;padding:8px;max-height:280px;overflow:auto}
+    video{width:100%;max-height:360px;background:#000;border-radius:8px}
+    label{display:inline-flex;align-items:center;gap:6px}
+  </style>
 </head>
 <body>
-    <h1>PS5 MP4 Fuzzer Tests</h1>
-    <p>Select a test file to load a fuzzed MP4 in the browser.</p>
-    <ul>
-        <li><a href="http://10.0.0.201:8080/test_0.html">Test 0</a></li>
-        <li><a href="http://10.0.0.201:8080/test_1.html">Test 1</a></li>
-        <li><a href="http://10.0.0.201:8080/test_2.html">Test 2</a></li>
-        <li><a href="http://10.0.0.201:8080/test_3.html">Test 3</a></li>
-        <li><a href="http://10.0.0.201:8080/test_4.html">Test 4</a></li>
-        <li><a href="http://10.0.0.201:8080/test_5.html">Test 5</a></li>
-        <li><a href="http://10.0.0.201:8080/test_6.html">Test 6</a></li>
-        <li><a href="http://10.0.0.201:8080/test_7.html">Test 7</a></li>
-        <li><a href="http://10.0.0.201:8080/test_8.html">Test 8</a></li>
-        <li><a href="http://10.0.0.201:8080/test_9.html">Test 9</a></li>
-    </ul>
+  <header>
+    <h1>PS5 MP4 Fuzzer – Safe Triage Hub</h1>
+    <p>Select a test, play it, and collect error/telemetry for reporting. No exploit code here—just repro + logging.</p>
+  </header>
+
+  <div class="row">
+    <section class="card" style="max-width:360px">
+      <h3>Tests</h3>
+      <div class="controls" style="margin-bottom:8px">
+        <button id="prevBtn" title="Previous">⟵ Prev</button>
+        <button id="nextBtn" title="Next">Next ⟶</button>
+        <button id="shuffleBtn" title="Shuffle order">Shuffle</button>
+      </div>
+      <div class="grid" id="testList"></div>
+    </section>
+
+    <section class="card">
+      <h3 id="nowPlaying">Now Playing: (none)</h3>
+      <div style="display:flex;gap:10px;align-items:center;margin:8px 0">
+        <label><input type="checkbox" id="autoplay" checked>Autoplay</label>
+        <label><input type="checkbox" id="loop" checked>Loop</label>
+        <label><input type="checkbox" id="muted" checked>Muted</label>
+      </div>
+      <video id="player" controls playsinline></video>
+      <div class="controls" style="margin-top:8px">
+        <button id="reloadBtn">Reload</button>
+        <button id="postReportBtn">Post Report</button>
+      </div>
+      <p style="font-size:12px;margin-top:6px">Tip: Keyboard ← / → to switch tests. <code>R</code> to reload.</p>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:16px">
+    <h3>Log</h3>
+    <pre id="log"></pre>
+  </section>
+
+  <script>
+  (function(){
+    // --- Config ---
+    var HOST = "http://10.0.0.201:8080";
+    var TEST_COUNT = 10;               // test_0.html .. test_9.html
+    var REPORT_ENDPOINT = HOST + "/report";
+    var makeTestUrl = function(i){ return HOST + "/test_" + i + ".html"; };
+
+    // If your tests are direct .mp4 files, switch to:
+    // var makeTestUrl = function(i){ return HOST + "/fuzz/test_" + i + ".mp4"; };
+
+    // --- State ---
+    var order = [];
+    for (var i=0;i<TEST_COUNT;i++) order.push(i);
+    var idx = -1;
+    var logs = [];
+    var player = document.getElementById("player");
+    var logEl = document.getElementById("log");
+    var listEl = document.getElementById("testList");
+    var nowPlayingEl = document.getElementById("nowPlaying");
+
+    var autoplayEl = document.getElementById("autoplay");
+    var loopEl = document.getElementById("loop");
+    var mutedEl = document.getElementById("muted");
+
+    function log(msg, extra){
+      var time = new Date().toISOString();
+      var line = { t: time, msg: String(msg), extra: extra || null };
+      logs.push(line);
+      var pretty = time + "  " + msg + (extra ? " " + safeStringify(extra) : "");
+      logEl.textContent = (logEl.textContent + "\n" + pretty).trim();
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function safeStringify(obj){
+      try { return JSON.stringify(obj); } catch(e){ return "[unserializable]"; }
+    }
+    function shuffle(){
+      for (var i=order.length-1; i>0; i--){
+        var j = Math.floor(Math.random()*(i+1));
+        var tmp = order[i]; order[i]=order[j]; order[j]=tmp;
+      }
+    }
+    function renderList(){
+      listEl.innerHTML = "";
+      for (var k=0; k<order.length; k++){
+        (function(k){
+          var i = order[k];
+          var a = document.createElement("a");
+          a.className = "link";
+          a.textContent = "Test " + i;
+          a.href = "#";
+          a.onclick = function(ev){
+            ev.preventDefault();
+            playIndex(k);
+          };
+          listEl.appendChild(a);
+        })(k);
+      }
+    }
+    function applyToggles(){
+      try {
+        player.autoplay = !!autoplayEl.checked;
+        player.loop = !!loopEl.checked;
+        player.muted = !!mutedEl.checked;
+      } catch(e){}
+    }
+    function setSource(url){
+      applyToggles();
+      player.removeAttribute("src");
+      // For HTML pages that embed a player, we can't load in <video>.
+      // If your tests are HTML wrappers, consider swapping tests to direct .mp4 URLs instead (see makeTestUrl comment).
+      // Here we attempt to load direct media; if it's an HTML page, you'll get a MEDIA_ERR_SRC_NOT_SUPPORTED.
+      player.src = url;
+      player.load();
+      nowPlayingEl.textContent = "Now Playing: " + url;
+      log("load", { url: url });
+      if (player.autoplay) {
+        // Attempt play; PS5 might require user gesture depending on settings.
+        var p = player.play();
+        if (p && p.catch) p.catch(function(e){ log("play() rejected", { error: String(e && e.message || e) }); });
+      }
+    }
+    function playIndex(k){
+      idx = k;
+      var testId = order[idx];
+      setSource(makeTestUrl(testId));
+      highlightSelection();
+    }
+    function prev(){ if (idx<=0){ idx=0; } else { idx--; } playIndex(idx); }
+    function next(){ if (idx<0) { idx=0; } else if (idx>=order.length-1){ idx = order.length-1; } else { idx++; } playIndex(idx); }
+    function highlightSelection(){
+      var children = listEl.children;
+      for (var i=0;i<children.length;i++){
+        children[i].style.background = (i===idx) ? "#eef6ff" : "transparent";
+      }
+    }
+    function collectEnv(){
+      return {
+        ua: navigator.userAgent,
+        platform: navigator.platform,
+        lang: navigator.language,
+        screen: { w: (screen && screen.width)||null, h: (screen && screen.height)||null },
+        viewport: { w: window.innerWidth, h: window.innerHeight },
+        time: new Date().toISOString()
+      };
+    }
+    function mediaErrorToString(err){
+      if (!err) return "Unknown";
+      var map = {
+        1: "MEDIA_ERR_ABORTED",
+        2: "MEDIA_ERR_NETWORK",
+        3: "MEDIA_ERR_DECODE",
+        4: "MEDIA_ERR_SRC_NOT_SUPPORTED"
+      };
+      return (map[err.code] || "ERR_" + err.code) + (err.message ? (": " + err.message) : "");
+    }
+    function postReport(){
+      var body = {
+        env: collectEnv(),
+        order: order.slice(0),
+        currentIndex: idx,
+        currentSrc: player && player.currentSrc || null,
+        currentTime: player && player.currentTime || 0,
+        readyState: player && player.readyState || null,
+        networkState: player && player.networkState || null,
+        duration: player && player.duration || null,
+        logs: logs.slice(-1000) // cap
+      };
+      log("posting report …", { bytes: safeStringify(body).length });
+      // Fire-and-forget POST
+      try {
+        fetch(REPORT_ENDPOINT, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(body)
+        }).then(function(r){
+          log("report status", { status: r.status });
+        }).catch(function(e){
+          log("report error", { error: String(e && e.message || e) });
+        });
+      } catch(e){
+        log("report exception", { error: String(e && e.message || e) });
+      }
+    }
+
+    // --- Wire UI ---
+    document.getElementById("prevBtn").onclick = prev;
+    document.getElementById("nextBtn").onclick = next;
+    document.getElementById("shuffleBtn").onclick = function(){
+      shuffle();
+      renderList();
+      highlightSelection();
+      log("shuffled");
+    };
+    document.getElementById("reloadBtn").onclick = function(){
+      var src = player.currentSrc || (idx>=0 ? makeTestUrl(order[idx]) : null);
+      if (src){ setSource(src); log("reload"); }
+    };
+    document.getElementById("postReportBtn").onclick = postReport;
+
+    autoplayEl.onchange = applyToggles;
+    loopEl.onchange = applyToggles;
+    mutedEl.onchange = applyToggles;
+
+    // Keyboard shortcuts
+    document.addEventListener("keydown", function(e){
+      var k = e.key || "";
+      if (k === "ArrowLeft"){ e.preventDefault(); prev(); }
+      else if (k === "ArrowRight"){ e.preventDefault(); next(); }
+      else if (k.toLowerCase && k.toLowerCase() === "r"){ e.preventDefault(); document.getElementById("reloadBtn").click(); }
+    });
+
+    // --- Media event telemetry ---
+    var mediaEvents = [
+      "loadstart","loadedmetadata","loadeddata","canplay","canplaythrough",
+      "play","playing","pause","stalled","suspend","waiting","seeking","seeked",
+      "durationchange","ratechange","volumechange","ended","emptied"
+    ];
+    for (var i=0;i<metaEventsLength();i++){
+      (function(name){
+        player.addEventListener(name, function(){
+          log("media:"+name, snapMedia());
+        });
+      })(mediaEvents[i]);
+    }
+    function metaEventsLength(){ return mediaEvents.length; }
+    function snapMedia(){
+      return {
+        currentSrc: player.currentSrc,
+        time: round2(player.currentTime),
+        duration: isFinite(player.duration) ? round2(player.duration) : null,
+        readyState: player.readyState,
+        networkState: player.networkState,
+        buffered: bufferedRanges(player.buffered)
+      };
+    }
+    function bufferedRanges(br){
+      try{
+        var out = [];
+        for (var i=0;i<br.length;i++){
+          out.push([round2(br.start(i)), round2(br.end(i))]);
+        }
+        return out;
+      }catch(e){ return []; }
+    }
+    function round2(x){ return Math.round(x*100)/100; }
+
+    player.onerror = function(){
+      var err = player.error;
+      log("media:error", { code: err && err.code, message: mediaErrorToString(err) });
+    };
+
+    // --- Init ---
+    renderList();
+    if (order.length > 0){ playIndex(0); }
+
+    // Initial environment log
+    log("env", collectEnv());
+  })();
+  </script>
 </body>
 </html>
